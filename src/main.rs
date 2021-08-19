@@ -33,7 +33,7 @@ pub struct PulsarConfig {
     pub token: Option<String>,
 }
 
-async fn get_pulsar_client(config: Config) -> Pulsar<TokioExecutor> {
+async fn get_pulsar_client(config: Config) -> Result<Pulsar<TokioExecutor>, pulsar::Error> {
     let addr = format!(
         "pulsar+ssl://{}:{}",
         config.pulsar.hostname, config.pulsar.port
@@ -44,12 +44,35 @@ async fn get_pulsar_client(config: Config) -> Pulsar<TokioExecutor> {
         name: "token".to_string(),
         data: config.pulsar.token.unwrap().into_bytes(),
     };
-
     builder = builder.with_auth(authentication);
 
-    builder.build().await.expect("Failed to build")
+    builder.build().await
 }
 
+async fn get_pulsar_reader(
+    pulsar: Pulsar<TokioExecutor>,
+    full_topic_name: &str,
+    initial_position: Option<MessageIdData>,
+) -> Result<Reader<String, TokioExecutor>, pulsar::Error> {
+    pulsar
+        .reader()
+        .with_topic(full_topic_name)
+        .with_consumer_name("test_reader")
+        .with_options(
+            if let Some(pos) = initial_position {
+                log::warn!("Reconnecting reader starting from {:?}", pos);
+                ConsumerOptions::default().starting_on_message(pos)
+            } else {
+                ConsumerOptions::default().with_initial_position(InitialPosition::Earliest)
+            }
+            .durable(false),
+        )
+        .into_reader()
+        .await
+}
+
+const CHECK_CONNECTION_TIMEOUT: usize = 30_000;
+const LOG_FREQUENCY: usize = 10;
 async fn read_topic(pulsar: Pulsar<TokioExecutor>, namespace: String, topic: String) {
     let full_topic_name = format!("persistent://public/{}/{}", namespace, &topic);
 
@@ -57,31 +80,21 @@ async fn read_topic(pulsar: Pulsar<TokioExecutor>, namespace: String, topic: Str
     let mut file = File::create(&filename).expect(&format!("Failed to create {}", &filename));
 
     let mut counter = 0_usize;
-    let mut initial_position: Option<MessageIdData> = None;
+    let mut last_position: Option<MessageIdData> = None;
     loop {
-        let mut reader: Fuse<Reader<String, _>> = pulsar
-            .reader()
-            .with_topic(&full_topic_name)
-            .with_consumer_name("test_reader")
-            .with_options(
-                if let Some(pos) = initial_position.clone() {
-                    ConsumerOptions::default().starting_on_message(pos.clone())
-                } else {
-                    ConsumerOptions::default().with_initial_position(InitialPosition::Earliest)
-                }
-                .durable(false),
-            )
-            .into_reader()
-            .await
-            .expect(&format!("Failed to create reader {}", &topic))
-            .fuse();
+        let mut reader: Fuse<Reader<String, _>> =
+            get_pulsar_reader(pulsar.clone(), &full_topic_name, last_position.clone())
+                .await
+                .expect(&format!("Failed to create reader {}", &full_topic_name))
+                .fuse();
 
-        let check_connection_timeout = 30_000;
-        let check_connection_timer = delay_ms(check_connection_timeout).fuse();
+        let check_connection_timer = delay_ms(CHECK_CONNECTION_TIMEOUT).fuse();
         futures::pin_mut!(check_connection_timer);
 
         'inner: loop {
             futures::select! {
+                    // This is necessary due to a bug in our Pulsar broker
+                    // When the broker recovers the offloaded data from s3, it sometimes fails and hangs
                     _ = check_connection_timer => {
                         let connection_result = reader.get_mut().check_connection().await;
 
@@ -93,15 +106,23 @@ async fn read_topic(pulsar: Pulsar<TokioExecutor>, namespace: String, topic: Str
 
                     reader_message = reader.next() => {
                         if let Some(msg) = reader_message {
-                            check_connection_timer.set(delay_ms(check_connection_timeout).fuse());
+                            check_connection_timer.set(delay_ms(CHECK_CONNECTION_TIMEOUT).fuse());
+
                             let msg = msg.expect("Failed to read message");
+                            let message_id = msg.message_id();
+
+                            // Necessary to skip repeats due to reconnecting from last position
+                            if last_position == Some(message_id.clone()) {
+                                log::warn!("Skipping repeated message");
+                                continue;
+                            }
+                            last_position = Some(message_id.clone());
+
                             file.write(&msg.payload.data).expect("Failed to write data");
                             file.write(b"\n").expect("Failed to write delimiter");
-                            let message_id = msg.message_id();
-                            initial_position = Some(message_id.clone());
 
                             counter += 1;
-                            if counter % 10 == 0 {
+                            if counter % LOG_FREQUENCY == 0 {
                                 log::info!("{} got {} messages", &topic, counter);
                             }
                         }
@@ -116,21 +137,24 @@ fn get_topic(game_id: &str) -> String {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), pulsar::Error> {
+async fn main() {
     env_logger::init();
+
     let config: Config = config::load().expect("Unable to load config");
     let namespace = config.pulsar.namespace.clone();
+    let pulsar_client = get_pulsar_client(config)
+        .await
+        .expect("Failed to build pulsar client");
 
     let game_ids = vec!["3b4581f9-0cc1-4a3b-a6cf-f02d816b7473"];
     let topics = game_ids
         .into_iter()
         .map(|game_id| get_topic(&game_id))
         .collect::<Vec<_>>();
-    let pulsar_client = get_pulsar_client(config).await;
+
     let readers = topics
         .into_iter()
         .map(|topic| read_topic(pulsar_client.clone(), namespace.clone(), topic))
         .collect::<Vec<_>>();
     join_all(readers).await;
-    Ok(())
 }
