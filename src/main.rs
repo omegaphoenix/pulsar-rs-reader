@@ -25,13 +25,11 @@ pub struct PulsarConfig {
     pub token: Option<String>,
 }
 
-async fn read_topic(topic: String) {
-    let config: Config = config::load().expect("Unable to load config");
+async fn get_pulsar_client(config: Config) -> Pulsar<TokioExecutor> {
     let addr = format!(
         "pulsar+ssl://{}:{}",
         config.pulsar.hostname, config.pulsar.port
     );
-    let full_topic_name = format!("persistent://public/{}/{}", config.pulsar.namespace, &topic);
     let mut builder = Pulsar::builder(addr, TokioExecutor);
 
     let authentication = Authentication {
@@ -41,13 +39,15 @@ async fn read_topic(topic: String) {
 
     builder = builder.with_auth(authentication);
 
-    let pulsar: Pulsar<_> = builder.build().await.expect("Failed to build");
+    builder.build().await.expect("Failed to build")
+}
 
-    log::info!("created a reader");
+async fn read_topic(pulsar: Pulsar<TokioExecutor>, namespace: String, topic: String) {
+    let full_topic_name = format!("persistent://public/{}/{}", namespace, &topic);
 
-    let mut counter = 0_usize;
     let filename = format!("data/{}.jsonl", &topic);
     let mut file = File::create(&filename).expect(&format!("Failed to create {}", &filename));
+
     let mut reader: Reader<String, _> = pulsar
         .reader()
         .with_topic(&full_topic_name)
@@ -61,6 +61,7 @@ async fn read_topic(topic: String) {
         .await
         .expect(&format!("Failed to create reader {}", &topic));
 
+    let mut counter = 0_usize;
     while let Some(msg) = reader.next().await {
         let msg = msg.expect("Failed to read message");
         file.write(&msg.payload.data).expect("Failed to write data");
@@ -80,15 +81,18 @@ fn get_topic(game_id: &str) -> String {
 #[tokio::main]
 async fn main() -> Result<(), pulsar::Error> {
     env_logger::init();
+    let config: Config = config::load().expect("Unable to load config");
+    let namespace = config.pulsar.namespace.clone();
 
     let game_ids = vec!["3b4581f9-0cc1-4a3b-a6cf-f02d816b7473"];
     let topics = game_ids
         .into_iter()
         .map(|game_id| get_topic(&game_id))
         .collect::<Vec<_>>();
+    let pulsar_client = get_pulsar_client(config).await;
     let readers = topics
         .into_iter()
-        .map(|topic| read_topic(topic))
+        .map(|topic| read_topic(pulsar_client.clone(), namespace.clone(), topic))
         .collect::<Vec<_>>();
     join_all(readers).await;
     Ok(())
