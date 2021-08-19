@@ -1,0 +1,6 @@
+[pulsar]
+hostname = ""
+port = 0
+tenant = "public"
+namespace = ""
+token = ""
