@@ -1,14 +1,22 @@
 #![feature(async_closure)]
 mod config;
 use futures::future::join_all;
+use futures::stream::Fuse;
+use futures::FutureExt;
 use futures::StreamExt;
 use pulsar::{
     consumer::{ConsumerOptions, InitialPosition},
+    proto::MessageIdData,
     reader::Reader,
     Authentication, Pulsar, TokioExecutor,
 };
 use serde::Deserialize;
+use std::time::Duration;
 use std::{fs::File, io::Write};
+
+pub async fn delay_ms(ms: usize) {
+    tokio::time::sleep(Duration::from_millis(ms as u64)).await;
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,28 +56,57 @@ async fn read_topic(pulsar: Pulsar<TokioExecutor>, namespace: String, topic: Str
     let filename = format!("data/{}.jsonl", &topic);
     let mut file = File::create(&filename).expect(&format!("Failed to create {}", &filename));
 
-    let mut reader: Reader<String, _> = pulsar
-        .reader()
-        .with_topic(&full_topic_name)
-        .with_consumer_name("test_reader")
-        .with_options(
-            ConsumerOptions::default()
-                .with_initial_position(InitialPosition::Earliest)
-                .durable(false),
-        )
-        .into_reader()
-        .await
-        .expect(&format!("Failed to create reader {}", &topic));
-
     let mut counter = 0_usize;
-    while let Some(msg) = reader.next().await {
-        let msg = msg.expect("Failed to read message");
-        file.write(&msg.payload.data).expect("Failed to write data");
-        file.write(b"\n").expect("Failed to write delimiter");
+    let mut initial_position: Option<MessageIdData> = None;
+    loop {
+        let mut reader: Fuse<Reader<String, _>> = pulsar
+            .reader()
+            .with_topic(&full_topic_name)
+            .with_consumer_name("test_reader")
+            .with_options(
+                if let Some(pos) = initial_position.clone() {
+                    ConsumerOptions::default().starting_on_message(pos.clone())
+                } else {
+                    ConsumerOptions::default().with_initial_position(InitialPosition::Earliest)
+                }
+                .durable(false),
+            )
+            .into_reader()
+            .await
+            .expect(&format!("Failed to create reader {}", &topic))
+            .fuse();
 
-        counter += 1;
-        if counter % 10 == 0 {
-            log::info!("{} got {} messages", &topic, counter);
+        let check_connection_timeout = 30_000;
+        let check_connection_timer = delay_ms(check_connection_timeout).fuse();
+        futures::pin_mut!(check_connection_timer);
+
+        'inner: loop {
+            futures::select! {
+                    _ = check_connection_timer => {
+                        let connection_result = reader.get_mut().check_connection().await;
+
+                        if let Err(e) = connection_result {
+                            log::error!("Check connection failed, attempting to reconnect... {}", e.to_string());
+                        }
+                        break 'inner;
+                    }
+
+                    reader_message = reader.next() => {
+                        if let Some(msg) = reader_message {
+                            check_connection_timer.set(delay_ms(check_connection_timeout).fuse());
+                            let msg = msg.expect("Failed to read message");
+                            file.write(&msg.payload.data).expect("Failed to write data");
+                            file.write(b"\n").expect("Failed to write delimiter");
+                            let message_id = msg.message_id();
+                            initial_position = Some(message_id.clone());
+
+                            counter += 1;
+                            if counter % 10 == 0 {
+                                log::info!("{} got {} messages", &topic, counter);
+                            }
+                        }
+                    }
+            }
         }
     }
 }
