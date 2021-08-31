@@ -133,7 +133,7 @@ async fn read_topic(pulsar: Pulsar<TokioExecutor>, namespace: String, topic: Str
 }
 
 fn get_topic(game_id: &str) -> String {
-    format!("flex_cv_tracks_{}", game_id)
+    format!("autoeventing_markings_{}", game_id)
 }
 
 #[tokio::main]
@@ -146,7 +146,7 @@ async fn main() {
         .await
         .expect("Failed to build pulsar client");
 
-    let game_ids = vec!["3b4581f9-0cc1-4a3b-a6cf-f02d816b7473"];
+    let game_ids = vec!["b736cc12-62ff-4c79-9541-92b150252121"];
     let topics = game_ids
         .into_iter()
         .map(|game_id| get_topic(&game_id))
