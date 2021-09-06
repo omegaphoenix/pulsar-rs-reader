@@ -10,7 +10,9 @@ use pulsar::{
     reader::Reader,
     Authentication, Pulsar, TokioExecutor,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json;
+use std::ops::Deref;
 use std::time::Duration;
 use std::{fs::File, io::Write};
 
@@ -31,6 +33,40 @@ pub struct PulsarConfig {
     pub tenant: String,
     pub namespace: String,
     pub token: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "MessageIdData")]
+pub struct MessageIdDataDef {
+    pub ledger_id: u64,
+    pub entry_id: u64,
+    pub partition: Option<i32>,
+    pub batch_index: Option<i32>,
+    pub ack_set: Vec<i64>,
+    pub batch_size: Option<i32>,
+}
+
+impl From<MessageIdData> for MessageIdDataDef {
+    fn from(raw: MessageIdData) -> MessageIdDataDef {
+        MessageIdDataDef {
+            ledger_id: raw.ledger_id,
+            entry_id: raw.entry_id,
+            partition: raw.partition,
+            batch_index: raw.batch_index,
+            ack_set: raw.ack_set,
+            batch_size: raw.batch_size,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct Helper(#[serde(with = "MessageIdDataDef")] MessageIdData);
+
+impl Deref for Helper {
+    type Target = MessageIdData;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 async fn get_pulsar_client(config: Config) -> Result<Pulsar<TokioExecutor>, pulsar::Error> {
@@ -110,6 +146,7 @@ async fn read_topic(pulsar: Pulsar<TokioExecutor>, namespace: String, topic: Str
 
                             let msg = msg.expect("Failed to read message");
                             let message_id = msg.message_id();
+                            dbg!(serde_json::to_string(Helper(message_id)).unwrap());
 
                             // Necessary to skip repeats due to reconnecting from last position
                             if last_position == Some(message_id.clone()) {
