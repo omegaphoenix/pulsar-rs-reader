@@ -71,6 +71,7 @@ async fn get_pulsar_reader(
         .await
 }
 
+const RECONNECT_DELAY: usize = 100; // wait 100 ms before trying to reconnect
 const CHECK_CONNECTION_TIMEOUT: usize = 30_000;
 const LOG_FREQUENCY: usize = 10;
 async fn read_topic(pulsar: Pulsar<TokioExecutor>, namespace: String, topic: String) {
@@ -82,52 +83,57 @@ async fn read_topic(pulsar: Pulsar<TokioExecutor>, namespace: String, topic: Str
     let mut counter = 0_usize;
     let mut last_position: Option<MessageIdData> = None;
     loop {
-        let mut reader: Fuse<Reader<String, _>> =
-            get_pulsar_reader(pulsar.clone(), &full_topic_name, last_position.clone())
-                .await
-                .expect(&format!("Failed to create reader {}", &full_topic_name))
-                .fuse();
+        if let Ok(reader) =
+            get_pulsar_reader(pulsar.clone(), &full_topic_name, last_position.clone()).await
+        {
+            let mut reader = reader.fuse();
+            let check_connection_timer = delay_ms(CHECK_CONNECTION_TIMEOUT).fuse();
+            futures::pin_mut!(check_connection_timer);
 
-        let check_connection_timer = delay_ms(CHECK_CONNECTION_TIMEOUT).fuse();
-        futures::pin_mut!(check_connection_timer);
+            'inner: loop {
+                futures::select! {
+                        // This is necessary due to a bug in our Pulsar broker
+                        // When the broker recovers the offloaded data from s3, it sometimes fails and hangs
+                        _ = check_connection_timer => {
+                            let connection_result = reader.get_mut().check_connection().await;
 
-        'inner: loop {
-            futures::select! {
-                    // This is necessary due to a bug in our Pulsar broker
-                    // When the broker recovers the offloaded data from s3, it sometimes fails and hangs
-                    _ = check_connection_timer => {
-                        let connection_result = reader.get_mut().check_connection().await;
-
-                        if let Err(e) = connection_result {
-                            log::error!("Check connection failed, attempting to reconnect... {}", e.to_string());
-                        }
-                        break 'inner;
-                    }
-
-                    reader_message = reader.next() => {
-                        if let Some(msg) = reader_message {
-                            check_connection_timer.set(delay_ms(CHECK_CONNECTION_TIMEOUT).fuse());
-
-                            let msg = msg.expect("Failed to read message");
-                            let message_id = msg.message_id();
-
-                            // Necessary to skip repeats due to reconnecting from last position
-                            if last_position == Some(message_id.clone()) {
-                                log::warn!("Skipping repeated message");
-                                continue;
+                            if let Err(e) = connection_result {
+                                log::error!("Check connection failed, attempting to reconnect... {}", e.to_string());
                             }
-                            last_position = Some(message_id.clone());
+                            break 'inner;
+                        }
 
-                            file.write(&msg.payload.data).expect("Failed to write data");
-                            file.write(b"\n").expect("Failed to write delimiter");
+                        reader_message = reader.next() => {
+                            if let Some(msg) = reader_message {
+                                check_connection_timer.set(delay_ms(CHECK_CONNECTION_TIMEOUT).fuse());
 
-                            counter += 1;
-                            if counter % LOG_FREQUENCY == 0 {
-                                log::info!("{} got {} messages", &topic, counter);
+                                let msg = msg.expect("Failed to read message");
+                                let message_id = msg.message_id();
+
+                                // Necessary to skip repeats due to reconnecting from last position
+                                if last_position == Some(message_id.clone()) {
+                                    log::warn!("Skipping repeated message");
+                                    continue;
+                                }
+                                last_position = Some(message_id.clone());
+
+                                file.write(&msg.payload.data).expect("Failed to write data");
+                                file.write(b"\n").expect("Failed to write delimiter");
+
+                                counter += 1;
+                                if counter % LOG_FREQUENCY == 0 {
+                                    log::info!("{} got {} messages", &topic, counter);
+                                }
                             }
                         }
-                    }
+                }
             }
+        } else {
+            delay_ms(RECONNECT_DELAY).await;
+            log::error!(
+                "Failed to create reader on {} . Retrying...",
+                &full_topic_name
+            );
         }
     }
 }
