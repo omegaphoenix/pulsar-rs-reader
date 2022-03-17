@@ -1,6 +1,7 @@
 [pulsar]
 hostname = ""
-port = 0
+port = 6651
 tenant = "public"
 namespace = ""
+topic = ""
 token = ""

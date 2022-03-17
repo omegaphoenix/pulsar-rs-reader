@@ -1,7 +1,6 @@
 #![feature(async_closure)]
 mod config;
 use futures::future::join_all;
-use futures::stream::Fuse;
 use futures::FutureExt;
 use futures::StreamExt;
 use pulsar::{
@@ -30,6 +29,7 @@ pub struct PulsarConfig {
     pub port: u16,
     pub tenant: String,
     pub namespace: String,
+    pub topic: String,
     pub token: Option<String>,
 }
 
@@ -138,25 +138,18 @@ async fn read_topic(pulsar: Pulsar<TokioExecutor>, namespace: String, topic: Str
     }
 }
 
-fn get_topic(game_id: &str) -> String {
-    format!("flex_cv_tracks_{}", game_id)
-}
-
 #[tokio::main]
 async fn main() {
     env_logger::init();
 
     let config: Config = config::load().expect("Unable to load config");
     let namespace = config.pulsar.namespace.clone();
+    let topic = config.pulsar.topic.clone();
     let pulsar_client = get_pulsar_client(config)
         .await
         .expect("Failed to build pulsar client");
 
-    let game_ids = vec!["3b4581f9-0cc1-4a3b-a6cf-f02d816b7473"];
-    let topics = game_ids
-        .into_iter()
-        .map(|game_id| get_topic(&game_id))
-        .collect::<Vec<_>>();
+    let topics = vec![topic];
 
     let readers = topics
         .into_iter()
