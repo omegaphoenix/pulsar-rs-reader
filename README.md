@@ -6,6 +6,5 @@ This example also includes reconnect logic to get around a known bug in the Puls
 
 ## To Run
 1. `cp config.sample.toml config.toml`
-1. Fill in the pulsar hostname, port, tenant, namespace, and token in the `config.toml`
-1. Change the topic(s) passed into `read_topic` in the `main()` function
+1. Fill in the pulsar hostname, port, tenant, namespace, topic, and token in the `config.toml`
 1. `RUST_LOG=info cargo run`
