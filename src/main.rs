@@ -1,8 +1,8 @@
 #![feature(async_closure)]
 mod config;
-use futures::future::join_all;
-use futures::FutureExt;
-use futures::StreamExt;
+use std::{fs::File, io::Write, time::Duration};
+
+use futures::{future::join_all, FutureExt, StreamExt};
 use pulsar::{
     authentication::oauth2::{OAuth2Authentication, OAuth2Params},
     consumer::{ConsumerOptions, InitialPosition},
@@ -11,8 +11,10 @@ use pulsar::{
     Authentication, Pulsar, TokioExecutor,
 };
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
-use std::{fs::File, io::Write};
+
+static RECONNECT_DELAY: usize = 100; // wait 100 ms before trying to reconnect
+static CHECK_CONNECTION_TIMEOUT: usize = 30_000;
+static LOG_FREQUENCY: usize = 10;
 
 pub async fn delay_ms(ms: usize) {
     tokio::time::sleep(Duration::from_millis(ms as u64)).await;
@@ -96,9 +98,6 @@ async fn get_pulsar_reader(
         .await
 }
 
-const RECONNECT_DELAY: usize = 100; // wait 100 ms before trying to reconnect
-const CHECK_CONNECTION_TIMEOUT: usize = 30_000;
-const LOG_FREQUENCY: usize = 10;
 async fn read_topic(pulsar: Pulsar<TokioExecutor>, namespace: String, topic: String) {
     let full_topic_name = format!("persistent://public/{}/{}", namespace, &topic);
 
