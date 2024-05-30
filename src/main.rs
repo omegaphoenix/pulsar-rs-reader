@@ -19,8 +19,11 @@ pub async fn delay_ms(ms: usize) {
 }
 
 #[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Config {
+    /// If true, disconnects after we read the last message
+    #[serde(default)]
+    pub non_live: bool,
+
     pub pulsar: PulsarConfig,
 }
 
@@ -99,18 +102,29 @@ async fn get_pulsar_reader(
 const RECONNECT_DELAY: usize = 100; // wait 100 ms before trying to reconnect
 const CHECK_CONNECTION_TIMEOUT: usize = 30_000;
 const LOG_FREQUENCY: usize = 10;
-async fn read_topic(pulsar: Pulsar<TokioExecutor>, namespace: String, topic: String) {
+async fn read_topic(
+    pulsar: Pulsar<TokioExecutor>,
+    namespace: String,
+    topic: String,
+    non_live: bool,
+) {
     let full_topic_name = format!("persistent://public/{}/{}", namespace, &topic);
 
     let filename = format!("data/{}.jsonl", &topic);
-    let mut file = File::create(&filename).expect(&format!("Failed to create {}", &filename));
+    let mut file =
+        File::create(&filename).unwrap_or_else(|_| panic!("Failed to create {}", &filename));
 
     let mut counter = 0_usize;
     let mut last_position: Option<MessageIdData> = None;
     loop {
-        if let Ok(reader) =
+        if let Ok(mut reader) =
             get_pulsar_reader(pulsar.clone(), &full_topic_name, last_position.clone()).await
         {
+            let last_message_id = reader
+                .get_last_message_id()
+                .await
+                .expect("failed to get last message id");
+
             let mut reader = reader.fuse();
             let check_connection_timer = delay_ms(CHECK_CONNECTION_TIMEOUT).fuse();
             futures::pin_mut!(check_connection_timer);
@@ -125,6 +139,7 @@ async fn read_topic(pulsar: Pulsar<TokioExecutor>, namespace: String, topic: Str
                             if let Err(e) = connection_result {
                                 log::error!("Check connection failed, attempting to reconnect... {}", e.to_string());
                             }
+
                             break 'inner;
                         }
 
@@ -142,12 +157,21 @@ async fn read_topic(pulsar: Pulsar<TokioExecutor>, namespace: String, topic: Str
                                 }
                                 last_position = Some(message_id.clone());
 
-                                file.write(&msg.payload.data).expect("Failed to write data");
-                                file.write(b"\n").expect("Failed to write delimiter");
+                                file.write_all(&msg.payload.data).expect("Failed to write data");
+                                file.write_all(b"\n").expect("Failed to write delimiter");
 
                                 counter += 1;
                                 if counter % LOG_FREQUENCY == 0 {
                                     log::info!("{} got {} messages", &topic, counter);
+                                }
+
+                                if non_live {
+                                    if let Some(last_position) = last_position.clone() {
+                                        if last_position.entry_id == last_message_id.entry_id && last_position.ledger_id == last_message_id.ledger_id {
+                                            log::info!("Reached last message. Disconnecting");
+                                            return;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -170,6 +194,8 @@ async fn main() {
     let config: Config = config::load().expect("Unable to load config");
     let namespace = config.pulsar.namespace.clone();
     let topic = config.pulsar.topic.clone();
+    let non_live = config.non_live;
+
     let pulsar_client = get_pulsar_client(config)
         .await
         .expect("Failed to build pulsar client");
@@ -178,7 +204,7 @@ async fn main() {
 
     let readers = topics
         .into_iter()
-        .map(|topic| read_topic(pulsar_client.clone(), namespace.clone(), topic))
+        .map(|topic| read_topic(pulsar_client.clone(), namespace.clone(), topic, non_live))
         .collect::<Vec<_>>();
     join_all(readers).await;
 }

@@ -1,3 +1,6 @@
+# Set to true if you want the reader to exit on the last message
+non_live = false
+
 [pulsar]
 hostname = ""
 port = 6651
