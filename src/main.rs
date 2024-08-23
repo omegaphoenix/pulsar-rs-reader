@@ -24,6 +24,10 @@ pub struct Config {
     #[serde(default)]
     pub non_live: bool,
 
+    /// If true, includes message metadata (publish time) in addition to message data
+    #[serde(default)]
+    pub with_metadata: bool,
+
     pub pulsar: PulsarConfig,
 }
 
@@ -107,6 +111,7 @@ async fn read_topic(
     namespace: String,
     topic: String,
     non_live: bool,
+    with_metadata: bool,
 ) {
     let full_topic_name = format!("persistent://public/{}/{}", namespace, &topic);
 
@@ -157,7 +162,19 @@ async fn read_topic(
                                 }
                                 last_position = Some(message_id.clone());
 
-                                file.write_all(&msg.payload.data).expect("Failed to write data");
+
+                                let bytes = if with_metadata {
+                                    let msg_with_metadata = MessageWithMetadata {
+                                        publish_time: msg.metadata().publish_time,
+                                        message: std::str::from_utf8(&msg.payload.data).expect("Failed to decode data into utf-8").to_owned(),
+                                    };
+
+                                    serde_json::to_vec(&msg_with_metadata).expect("Failed to serialize message with metadata")
+                                } else {
+                                    msg.payload.data
+                                };
+
+                                file.write_all(&bytes).expect("Failed to write data");
                                 file.write_all(b"\n").expect("Failed to write delimiter");
 
                                 counter += 1;
@@ -187,6 +204,12 @@ async fn read_topic(
     }
 }
 
+#[derive(Serialize)]
+struct MessageWithMetadata {
+    pub publish_time: u64,
+    pub message: String,
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -195,6 +218,7 @@ async fn main() {
     let namespace = config.pulsar.namespace.clone();
     let topic = config.pulsar.topic.clone();
     let non_live = config.non_live;
+    let with_metadata = config.with_metadata;
 
     let pulsar_client = get_pulsar_client(config)
         .await
@@ -204,7 +228,15 @@ async fn main() {
 
     let readers = topics
         .into_iter()
-        .map(|topic| read_topic(pulsar_client.clone(), namespace.clone(), topic, non_live))
+        .map(|topic| {
+            read_topic(
+                pulsar_client.clone(),
+                namespace.clone(),
+                topic,
+                non_live,
+                with_metadata,
+            )
+        })
         .collect::<Vec<_>>();
     join_all(readers).await;
 }

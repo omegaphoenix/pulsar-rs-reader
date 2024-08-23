@@ -1,6 +1,9 @@
 # Set to true if you want the reader to exit on the last message
 non_live = false
 
+# Set to true if you want to get the publish_time with each message
+with_metadata = false
+
 [pulsar]
 hostname = ""
 port = 6651
@@ -9,6 +12,7 @@ namespace = ""
 topic = ""
 ### Optional if using token authentication ###
 token = ""
+
 ### Otherwise use oauth instead ##############
 [pulsar.oauth]
 client_id = ""
