@@ -1,4 +1,3 @@
-#![feature(async_closure)]
 mod config;
 use futures::future::join_all;
 use futures::FutureExt;
