@@ -107,12 +107,13 @@ const CHECK_CONNECTION_TIMEOUT: usize = 30_000;
 const LOG_FREQUENCY: usize = 10;
 async fn read_topic(
     pulsar: Pulsar<TokioExecutor>,
+    tenant: String,
     namespace: String,
     topic: String,
     non_live: bool,
     with_metadata: bool,
 ) {
-    let full_topic_name = format!("persistent://public/{}/{}", namespace, &topic);
+    let full_topic_name = format!("persistent://{tenant}/{namespace}/{topic}");
 
     let filename = format!("data/{}.jsonl", &topic);
     let mut file =
@@ -214,6 +215,7 @@ async fn main() {
     env_logger::init();
 
     let config: Config = config::load().expect("Unable to load config");
+    let tenant = config.pulsar.tenant.clone();
     let namespace = config.pulsar.namespace.clone();
     let topic = config.pulsar.topic.clone();
     let non_live = config.non_live;
@@ -230,6 +232,7 @@ async fn main() {
         .map(|topic| {
             read_topic(
                 pulsar_client.clone(),
+                tenant.clone(),
                 namespace.clone(),
                 topic,
                 non_live,
